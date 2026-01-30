@@ -4,6 +4,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using ModelContextProtocol.Client;
 using System.Diagnostics;
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -19,10 +20,17 @@ var (command, arguments) = GetCommandAndArguments(args);
 if (command == "http")
 {
     // make sure AspNetCoreMcpServer is running
+    var httpClientHandler = new HttpClientHandler
+    {
+        UseDefaultCredentials = true
+    };
+
+    var httpClient = new HttpClient(httpClientHandler);
+
     clientTransport = new HttpClientTransport(new()
     {
         Endpoint = new Uri("http://localhost:3001")
-    });
+    }, httpClient, ownsHttpClient: true);
 }
 else
 {

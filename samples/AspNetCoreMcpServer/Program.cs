@@ -1,8 +1,9 @@
+using AspNetCoreMcpServer.Tools;
+using AspNetCoreMcpServer.Resources;
+using Microsoft.AspNetCore.Authentication.Negotiate;
 using OpenTelemetry;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
-using AspNetCoreMcpServer.Tools;
-using AspNetCoreMcpServer.Resources;
 using System.Net.Http.Headers;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -23,6 +24,11 @@ builder.Services.AddOpenTelemetry()
     .WithLogging()
     .UseOtlpExporter();
 
+builder.Services.AddAuthentication(NegotiateDefaults.AuthenticationScheme)
+    .AddNegotiate();
+
+builder.Services.AddAuthorization();
+
 // Configure HttpClientFactory for weather.gov API
 builder.Services.AddHttpClient("WeatherApi", client =>
 {
@@ -32,6 +38,10 @@ builder.Services.AddHttpClient("WeatherApi", client =>
 
 var app = builder.Build();
 
-app.MapMcp();
+app.UseAuthentication();
+
+app.UseAuthorization();
+
+app.MapMcp().RequireAuthorization();
 
 app.Run();
