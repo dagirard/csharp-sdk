@@ -90,7 +90,7 @@ IList<McpClientTool> tools = await client.ListToolsAsync();
 IChatClient chatClient = ...;
 var response = await chatClient.GetResponseAsync(
     "your prompt here",
-    new() { Tools = [.. tools] },
+    new() { Tools = [.. tools] });
 ```
 
 ## Getting Started (Server)
@@ -225,7 +225,7 @@ McpServerOptions options = new()
 
                 return ValueTask.FromResult(new CallToolResult
                 {
-                    Content = [new TextContentBlock { Text = $"Echo: {message}", Type = "text" }]
+                    Content = [new TextContentBlock { Text = $"Echo: {message}" }]
                 });
             }
 

@@ -93,6 +93,17 @@ public class StreamableHttpServerConformanceTests(ITestOutputHelper outputHelper
     }
 
     [Fact]
+    public async Task SseResponse_Includes_XAccelBufferingHeader()
+    {
+        await StartAsync();
+
+        using var response = await HttpClient.PostAsync("", JsonContent(InitializeRequest), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("no", Assert.Single(response.Headers.GetValues("X-Accel-Buffering")));
+    }
+
+    [Fact]
     public async Task PostRequest_IsUnsupportedMediaType_WithoutJsonContentType()
     {
         await StartAsync();
@@ -158,6 +169,54 @@ public class StreamableHttpServerConformanceTests(ITestOutputHelper outputHelper
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
+    [Theory]
+    [InlineData("invalid-version")]
+    [InlineData("9999-01-01")]
+    [InlineData("not-a-date")]
+    public async Task PostRequest_IsBadRequest_WithInvalidProtocolVersionHeader(string invalidVersion)
+    {
+        await StartAsync();
+
+        HttpClient.DefaultRequestHeaders.Add("MCP-Protocol-Version", invalidVersion);
+
+        using var response = await HttpClient.PostAsync("", JsonContent(InitializeRequest), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostRequest_Succeeds_WithoutProtocolVersionHeader()
+    {
+        await StartAsync();
+
+        // No MCP-Protocol-Version header is set - this should be accepted for backwards compatibility
+        using var response = await HttpClient.PostAsync("", JsonContent(InitializeRequest), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostRequest_Succeeds_WithValidProtocolVersionHeader()
+    {
+        await StartAsync();
+
+        HttpClient.DefaultRequestHeaders.Add("MCP-Protocol-Version", "2025-03-26");
+
+        using var response = await HttpClient.PostAsync("", JsonContent(InitializeRequest), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetRequest_IsBadRequest_WithInvalidProtocolVersionHeader()
+    {
+        await StartAsync();
+
+        await CallInitializeAndValidateAsync();
+
+        HttpClient.DefaultRequestHeaders.Add("MCP-Protocol-Version", "invalid-version");
+
+        using var response = await HttpClient.GetAsync("", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     [Fact]
     public async Task PostRequest_IsNotFound_WithUnrecognizedSessionId()
     {
@@ -173,6 +232,15 @@ public class StreamableHttpServerConformanceTests(ITestOutputHelper outputHelper
         };
         using var response = await HttpClient.SendAsync(request, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostWithoutSessionId_NonInitializeRequest_Returns400()
+    {
+        await StartAsync();
+
+        using var response = await HttpClient.PostAsync("", JsonContent(ListToolsRequest), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
@@ -257,11 +325,13 @@ public class StreamableHttpServerConformanceTests(ITestOutputHelper outputHelper
         Builder.Services.AddMcpServer()
             .WithHttpTransport(options =>
             {
+#pragma warning disable MCPEXP002 // RunSessionHandler is experimental
                 options.RunSessionHandler = (httpContext, mcpServer, cancellationToken) =>
                 {
                     server = mcpServer;
                     return mcpServer.RunAsync(cancellationToken);
                 };
+#pragma warning restore MCPEXP002
             });
 
         await StartAsync();
@@ -297,11 +367,13 @@ public class StreamableHttpServerConformanceTests(ITestOutputHelper outputHelper
         Builder.Services.AddMcpServer()
             .WithHttpTransport(options =>
             {
+#pragma warning disable MCPEXP002 // RunSessionHandler is experimental
                 options.RunSessionHandler = (httpContext, mcpServer, cancellationToken) =>
                 {
                     server = mcpServer;
                     return mcpServer.RunAsync(cancellationToken);
                 };
+#pragma warning restore MCPEXP002
             });
 
         await StartAsync();
@@ -434,11 +506,13 @@ public class StreamableHttpServerConformanceTests(ITestOutputHelper outputHelper
             .WithHttpTransport(options =>
             {
                 options.PerSessionExecutionContext = true;
+#pragma warning disable MCPEXP002 // RunSessionHandler is experimental
                 options.RunSessionHandler = async (httpContext, mcpServer, cancellationToken) =>
                 {
                     asyncLocal.Value = $"RunSessionHandler ({totalSessionCount++})";
                     await mcpServer.RunAsync(cancellationToken);
                 };
+#pragma warning restore MCPEXP002
             });
 
         Builder.Services.AddSingleton(McpServerTool.Create([McpServerTool(Name = "async-local-session")] () => asyncLocal.Value));
@@ -667,6 +741,10 @@ public class StreamableHttpServerConformanceTests(ITestOutputHelper outputHelper
 
     private static string InitializeRequest => """
         {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"IntegrationTestClient","version":"1.0.0"}}}
+        """;
+
+    private static string ListToolsRequest => """
+        {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
         """;
 
     private long _lastRequestId = 1;

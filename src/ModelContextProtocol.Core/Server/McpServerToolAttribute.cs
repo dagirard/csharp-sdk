@@ -58,7 +58,7 @@ namespace ModelContextProtocol.Server;
 ///       When the <see cref="McpServerTool"/> is constructed, it may be passed an <see cref="IServiceProvider"/> via
 ///       <see cref="McpServerToolCreateOptions.Services"/>. Any parameter that can be satisfied by that <see cref="IServiceProvider"/>
 ///       according to <see cref="IServiceProviderIsService"/> will not be included in the generated JSON schema and will be resolved
-///       from the <see cref="IServiceProvider"/> provided to when the tool is invoked rather than from the argument collection.
+///       from the <see cref="IServiceProvider"/> provided when the tool is invoked rather than from the argument collection.
 ///     </description>
 ///   </item>
 ///   <item>
@@ -80,6 +80,26 @@ namespace ModelContextProtocol.Server;
 /// should thus be considered unvalidated and untrusted. To provide validated and trusted data to the invocation of the tool, consider having
 /// the tool be an instance method, referring to data stored in the instance, or using an instance or parameters resolved from the <see cref="IServiceProvider"/>
 /// to provide data to the method.
+/// </para>
+/// <para>
+/// The tool method is responsible for validating its own input arguments (e.g., checking required fields, value ranges, string lengths, or
+/// any other business rules). Data annotations such as <c>RequiredAttribute</c> and
+/// <c>MaxLengthAttribute</c> on parameter types influence the generated JSON schema exposed
+/// to clients, but they are not enforced at runtime by the SDK. Validation should be performed explicitly within the tool method.
+/// </para>
+/// <para>
+/// To signal an error (including validation failures) back to the client, either throw an <see cref="McpException"/>
+/// or return a <see cref="CallToolResult"/> with <see cref="CallToolResult.IsError"/> set to <see langword="true"/>.
+/// When a tool throws an <see cref="McpException"/>, its <see cref="Exception.Message"/> is included in the error result
+/// sent to the client. Throwing any other exception type also results in an error <see cref="CallToolResult"/>, but with
+/// a generic error message (to avoid leaking sensitive information). Alternatively, a tool can declare a return type of
+/// <see cref="CallToolResult"/> to have full control over both success and error responses.
+/// </para>
+/// <para>
+/// It is important to provide clear <see cref="System.ComponentModel.DescriptionAttribute"/> values on tool methods and their parameters.
+/// These descriptions are surfaced to AI models and help them determine when and how to use the tool, what values to pass for each parameter,
+/// and what constraints the parameters have. Well-written descriptions reduce incorrect tool invocations and improve the quality of
+/// model interactions.
 /// </para>
 /// <para>
 /// Return values from a method are used to create the <see cref="CallToolResult"/> that is sent back to the client:

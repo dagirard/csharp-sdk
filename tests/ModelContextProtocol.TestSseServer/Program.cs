@@ -85,12 +85,7 @@ public class Program
                     Name = $"Resource {i + 1}",
                     MimeType = "application/octet-stream"
                 });
-                resourceContents.Add(new BlobResourceContents
-                {
-                    Uri = uri,
-                    MimeType = "application/octet-stream",
-                    Blob = Convert.ToBase64String(buffer)
-                });
+                resourceContents.Add(BlobResourceContents.FromBytes(buffer, uri, "application/octet-stream"));
             }
         }
 
@@ -175,12 +170,14 @@ public class Program
                     ]
                 };
             },
+
             CallToolHandler = async (request, cancellationToken) =>
             {
                 if (request.Params is null)
                 {
                     throw new McpProtocolException("Missing required parameter 'name'", McpErrorCode.InvalidParams);
                 }
+
                 if (request.Params.Name == "echo")
                 {
                     if (request.Params.Arguments is null || !request.Params.Arguments.TryGetValue("message", out var message))
@@ -233,9 +230,9 @@ public class Program
                     throw new McpProtocolException($"Unknown tool: '{request.Params.Name}'", McpErrorCode.InvalidParams);
                 }
             },
+
             ListResourceTemplatesHandler = async (request, cancellationToken) =>
             {
-
                 return new ListResourceTemplatesResult
                 {
                     ResourceTemplates = [
@@ -247,10 +244,12 @@ public class Program
                     ]
                 };
             },
+
             ListResourcesHandler = async (request, cancellationToken) =>
             {
                 int startIndex = 0;
                 var requestParams = request.Params ?? new();
+
                 if (requestParams.Cursor is not null)
                 {
                     try
@@ -278,6 +277,7 @@ public class Program
                     Resources = resources.GetRange(startIndex, endIndex - startIndex)
                 };
             },
+
             ReadResourceHandler = async (request, cancellationToken) =>
             {
                 if (request.Params?.Uri is null)
@@ -314,6 +314,7 @@ public class Program
                     Contents = [contents]
                 };
             },
+
             ListPromptsHandler = async (request, cancellationToken) =>
             {
                 return new ListPromptsResult
@@ -347,13 +348,16 @@ public class Program
                     ]
                 };
             },
+
             GetPromptHandler = async (request, cancellationToken) =>
             {
                 if (request.Params is null)
                 {
                     throw new McpProtocolException("Missing required parameter 'name'", McpErrorCode.InvalidParams);
                 }
+
                 List<PromptMessage> messages = [];
+
                 if (request.Params.Name == "simple_prompt")
                 {
                     messages.Add(new PromptMessage
@@ -381,7 +385,7 @@ public class Program
                         Role = Role.User,
                         Content = new ImageContentBlock
                         {
-                            Data = MCP_TINY_IMAGE,
+                            Data = System.Text.Encoding.UTF8.GetBytes(MCP_TINY_IMAGE),
                             MimeType = "image/png"
                         }
                     });
@@ -395,7 +399,7 @@ public class Program
                 {
                     Messages = messages
                 };
-            }
+            },
         };
     }
 

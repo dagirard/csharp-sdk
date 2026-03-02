@@ -6,6 +6,7 @@ using System.Text.Json;
 namespace ModelContextProtocol.Client;
 
 /// <inheritdoc/>
+#pragma warning disable MCPEXP002
 internal sealed partial class McpClientImpl : McpClient
 {
     private static Implementation DefaultImplementation { get; } = new()
@@ -22,8 +23,6 @@ internal sealed partial class McpClientImpl : McpClient
     private readonly SemaphoreSlim _disposeLock = new(1, 1);
     private readonly McpTaskCancellationTokenProvider? _taskCancellationTokenProvider;
 
-    private CancellationTokenSource? _connectCts;
-
     private ServerCapabilities? _serverCapabilities;
     private Implementation? _serverInfo;
     private string? _serverInstructions;
@@ -39,6 +38,7 @@ internal sealed partial class McpClientImpl : McpClient
     /// <param name="options">Options for the client, defining protocol version and capabilities.</param>
     /// <param name="loggerFactory">The logger factory.</param>
     internal McpClientImpl(ITransport transport, string endpointName, McpClientOptions? options, ILoggerFactory? loggerFactory)
+#pragma warning restore MCPEXP002
     {
         options ??= new();
 
@@ -526,9 +526,6 @@ internal sealed partial class McpClientImpl : McpClient
     /// </summary>
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
-        _connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cancellationToken = _connectCts.Token;
-
         try
         {
             // We don't want the ConnectAsync token to cancel the message processing loop after we've successfully connected.

@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Net.Http.Headers;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using System.Collections.Concurrent;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text.Json.Serialization.Metadata;
@@ -23,15 +24,39 @@ internal sealed class StreamableHttpHandler(
     ILoggerFactory loggerFactory)
 {
     private const string McpSessionIdHeaderName = "Mcp-Session-Id";
+    private const string McpProtocolVersionHeaderName = "MCP-Protocol-Version";
     private const string LastEventIdHeaderName = "Last-Event-ID";
+
+    /// <summary>
+    /// All protocol versions supported by this implementation.
+    /// Keep in sync with McpSessionHandler.SupportedProtocolVersions in ModelContextProtocol.Core.
+    /// </summary>
+    private static readonly HashSet<string> s_supportedProtocolVersions =
+    [
+        "2024-11-05",
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25",
+    ];
 
     private static readonly JsonTypeInfo<JsonRpcMessage> s_messageTypeInfo = GetRequiredJsonTypeInfo<JsonRpcMessage>();
     private static readonly JsonTypeInfo<JsonRpcError> s_errorTypeInfo = GetRequiredJsonTypeInfo<JsonRpcError>();
+
+    private static bool AllowNewSessionForNonInitializeRequests { get; } =
+        AppContext.TryGetSwitch("ModelContextProtocol.AspNetCore.AllowNewSessionForNonInitializeRequests", out var enabled) && enabled;
+
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _migrationLocks = new(StringComparer.Ordinal);
 
     public HttpServerTransportOptions HttpServerTransportOptions => httpServerTransportOptions.Value;
 
     public async Task HandlePostRequestAsync(HttpContext context)
     {
+        if (!ValidateProtocolVersionHeader(context, out var errorMessage))
+        {
+            await WriteJsonRpcErrorAsync(context, errorMessage!, StatusCodes.Status400BadRequest);
+            return;
+        }
+
         // The Streamable HTTP spec mandates the client MUST accept both application/json and text/event-stream.
         // ASP.NET Core Minimal APIs mostly try to stay out of the business of response content negotiation,
         // so we have to do this manually. The spec doesn't mandate that servers MUST reject these requests,
@@ -45,14 +70,6 @@ internal sealed class StreamableHttpHandler(
             return;
         }
 
-        var session = await GetOrCreateSessionAsync(context);
-        if (session is null)
-        {
-            return;
-        }
-
-        await using var _ = await session.AcquireReferenceAsync(context.RequestAborted);
-
         var message = await ReadJsonRpcMessageAsync(context);
         if (message is null)
         {
@@ -61,6 +78,14 @@ internal sealed class StreamableHttpHandler(
                 StatusCodes.Status400BadRequest);
             return;
         }
+
+        var session = await GetOrCreateSessionAsync(context, message);
+        if (session is null)
+        {
+            return;
+        }
+
+        await using var _ = await session.AcquireReferenceAsync(context.RequestAborted);
 
         InitializeSseResponse(context);
         var wroteResponse = await session.Transport.HandlePostRequestAsync(message, context.Response.Body, context.RequestAborted);
@@ -74,6 +99,12 @@ internal sealed class StreamableHttpHandler(
 
     public async Task HandleGetRequestAsync(HttpContext context)
     {
+        if (!ValidateProtocolVersionHeader(context, out var errorMessage))
+        {
+            await WriteJsonRpcErrorAsync(context, errorMessage!, StatusCodes.Status400BadRequest);
+            return;
+        }
+
         if (!context.Request.GetTypedHeaders().Accept.Any(MatchesTextEventStreamMediaType))
         {
             await WriteJsonRpcErrorAsync(context,
@@ -171,6 +202,12 @@ internal sealed class StreamableHttpHandler(
 
     public async Task HandleDeleteRequestAsync(HttpContext context)
     {
+        if (!ValidateProtocolVersionHeader(context, out var errorMessage))
+        {
+            await WriteJsonRpcErrorAsync(context, errorMessage!, StatusCodes.Status400BadRequest);
+            return;
+        }
+
         var sessionId = context.Request.Headers[McpSessionIdHeaderName].ToString();
         if (sessionManager.TryRemove(sessionId, out var session))
         {
@@ -188,12 +225,18 @@ internal sealed class StreamableHttpHandler(
 
         if (!sessionManager.TryGetValue(sessionId, out var session))
         {
-            // -32001 isn't part of the MCP standard, but this is what the typescript-sdk currently does.
-            // One of the few other usages I found was from some Ethereum JSON-RPC documentation and this
-            // JSON-RPC library from Microsoft called StreamJsonRpc where it's called JsonRpcErrorCode.NoMarshaledObjectFound
-            // https://learn.microsoft.com/dotnet/api/streamjsonrpc.protocol.jsonrpcerrorcode?view=streamjsonrpc-2.9#fields
-            await WriteJsonRpcErrorAsync(context, "Session not found", StatusCodes.Status404NotFound, -32001);
-            return null;
+            // Session not found locally. Attempt migration if a handler is registered.
+            session = await TryMigrateSessionAsync(context, sessionId);
+
+            if (session is null)
+            {
+                // -32001 isn't part of the MCP standard, but this is what the typescript-sdk currently does.
+                // One of the few other usages I found was from some Ethereum JSON-RPC documentation and this
+                // JSON-RPC library from Microsoft called StreamJsonRpc where it's called JsonRpcErrorCode.NoMarshaledObjectFound
+                // https://learn.microsoft.com/dotnet/api/streamjsonrpc.protocol.jsonrpcerrorcode?view=streamjsonrpc-2.9#fields
+                await WriteJsonRpcErrorAsync(context, "Session not found", StatusCodes.Status404NotFound, -32001);
+                return null;
+            }
         }
 
         if (!session.HasSameUserId(context.User))
@@ -209,12 +252,61 @@ internal sealed class StreamableHttpHandler(
         return session;
     }
 
-    private async ValueTask<StreamableHttpSession?> GetOrCreateSessionAsync(HttpContext context)
+    private async ValueTask<StreamableHttpSession?> TryMigrateSessionAsync(HttpContext context, string sessionId)
+    {
+        if (HttpServerTransportOptions.SessionMigrationHandler is not { } handler)
+        {
+            return null;
+        }
+
+        var migrationLock = _migrationLocks.GetOrAdd(sessionId, static _ => new SemaphoreSlim(1, 1));
+        await migrationLock.WaitAsync(context.RequestAborted);
+        try
+        {
+            // Re-check after acquiring the lock - another thread may have already completed migration.
+            if (sessionManager.TryGetValue(sessionId, out var session))
+            {
+                return session;
+            }
+
+            var initParams = await handler.AllowSessionMigrationAsync(context, sessionId, context.RequestAborted);
+            if (initParams is null)
+            {
+                return null;
+            }
+
+            var migratedSession = await MigrateSessionAsync(context, sessionId, initParams);
+
+            // Register the session with the session manager while still holding the lock
+            // so concurrent requests for the same session ID find it via sessionManager.TryGetValue.
+            await migratedSession.EnsureStartedAsync(context.RequestAborted);
+
+            return migratedSession;
+        }
+        finally
+        {
+            migrationLock.Release();
+            _migrationLocks.TryRemove(sessionId, out _);
+        }
+    }
+
+    private async ValueTask<StreamableHttpSession?> GetOrCreateSessionAsync(HttpContext context, JsonRpcMessage message)
     {
         var sessionId = context.Request.Headers[McpSessionIdHeaderName].ToString();
 
         if (string.IsNullOrEmpty(sessionId))
         {
+            // In stateful mode, only allow creating new sessions for initialize requests.
+            // In stateless mode, every request is independent, so we always create a new session.
+            if (!HttpServerTransportOptions.Stateless && !AllowNewSessionForNonInitializeRequests
+                && message is not JsonRpcRequest { Method: RequestMethods.Initialize })
+            {
+                await WriteJsonRpcErrorAsync(context,
+                    "Bad Request: A new session can only be created by an initialize request. Include a valid Mcp-Session-Id header for non-initialize requests.",
+                    StatusCodes.Status400BadRequest);
+                return null;
+            }
+
             return await StartNewSessionAsync(context);
         }
         else if (HttpServerTransportOptions.Stateless)
@@ -243,7 +335,11 @@ internal sealed class StreamableHttpHandler(
                 SessionId = sessionId,
                 FlowExecutionContextFromRequests = !HttpServerTransportOptions.PerSessionExecutionContext,
                 EventStreamStore = HttpServerTransportOptions.EventStreamStore,
+                OnSessionInitialized = HttpServerTransportOptions.SessionMigrationHandler is { } handler
+                    ? (initParams, ct) => handler.OnSessionInitializedAsync(context, sessionId, initParams, ct)
+                    : null,
             };
+
             context.Response.Headers[McpSessionIdHeaderName] = sessionId;
         }
         else
@@ -264,11 +360,12 @@ internal sealed class StreamableHttpHandler(
     private async ValueTask<StreamableHttpSession> CreateSessionAsync(
         HttpContext context,
         StreamableHttpServerTransport transport,
-        string sessionId)
+        string sessionId,
+        Action<McpServerOptions>? configureOptions = null)
     {
         var mcpServerServices = applicationServices;
         var mcpServerOptions = mcpServerOptionsSnapshot.Value;
-        if (HttpServerTransportOptions.Stateless || HttpServerTransportOptions.ConfigureSessionOptions is not null)
+        if (HttpServerTransportOptions.Stateless || HttpServerTransportOptions.ConfigureSessionOptions is not null || configureOptions is not null)
         {
             mcpServerOptions = mcpServerOptionsFactory.Create(Options.DefaultName);
 
@@ -278,6 +375,8 @@ internal sealed class StreamableHttpHandler(
                 mcpServerServices = context.RequestServices;
                 mcpServerOptions.ScopeRequests = false;
             }
+
+            configureOptions?.Invoke(mcpServerOptions);
 
             if (HttpServerTransportOptions.ConfigureSessionOptions is { } configureSessionOptions)
             {
@@ -291,10 +390,36 @@ internal sealed class StreamableHttpHandler(
         var userIdClaim = GetUserIdClaim(context.User);
         var session = new StreamableHttpSession(sessionId, transport, server, userIdClaim, sessionManager);
 
+#pragma warning disable MCPEXP002 // RunSessionHandler is experimental
         var runSessionAsync = HttpServerTransportOptions.RunSessionHandler ?? RunSessionAsync;
+#pragma warning restore MCPEXP002
         session.ServerRunTask = runSessionAsync(context, server, session.SessionClosed);
 
         return session;
+    }
+
+    private async ValueTask<StreamableHttpSession> MigrateSessionAsync(
+        HttpContext context,
+        string sessionId,
+        InitializeRequestParams initializeParams)
+    {
+        var transport = new StreamableHttpServerTransport(loggerFactory)
+        {
+            SessionId = sessionId,
+            FlowExecutionContextFromRequests = !HttpServerTransportOptions.PerSessionExecutionContext,
+            EventStreamStore = HttpServerTransportOptions.EventStreamStore,
+        };
+
+        // Initialize the transport with the migrated session's init params.
+        await transport.HandleInitializeRequestAsync(initializeParams);
+
+        context.Response.Headers[McpSessionIdHeaderName] = sessionId;
+
+        return await CreateSessionAsync(context, transport, sessionId, options =>
+        {
+            options.KnownClientInfo = initializeParams.ClientInfo;
+            options.KnownClientCapabilities = initializeParams.Capabilities;
+        });
     }
 
     private async ValueTask<ISseEventStreamReader?> GetEventStreamReaderAsync(HttpContext context, string lastEventId)
@@ -339,6 +464,7 @@ internal sealed class StreamableHttpHandler(
 
         // Make sure we disable all response buffering for SSE.
         context.Response.Headers.ContentEncoding = "identity";
+        context.Response.Headers["X-Accel-Buffering"] = "no";
         context.Features.GetRequiredFeature<IHttpResponseBodyFeature>().DisableBuffering();
     }
 
@@ -389,6 +515,24 @@ internal sealed class StreamableHttpHandler(
     }
 
     internal static JsonTypeInfo<T> GetRequiredJsonTypeInfo<T>() => (JsonTypeInfo<T>)McpJsonUtilities.DefaultOptions.GetTypeInfo(typeof(T));
+
+    /// <summary>
+    /// Validates the MCP-Protocol-Version header if present. A missing header is allowed for backwards compatibility,
+    /// but an invalid or unsupported value must be rejected with 400 Bad Request per the MCP spec.
+    /// </summary>
+    private static bool ValidateProtocolVersionHeader(HttpContext context, out string? errorMessage)
+    {
+        var protocolVersionHeader = context.Request.Headers[McpProtocolVersionHeaderName].ToString();
+        if (!string.IsNullOrEmpty(protocolVersionHeader) &&
+            !s_supportedProtocolVersions.Contains(protocolVersionHeader))
+        {
+            errorMessage = $"Bad Request: The MCP-Protocol-Version header value '{protocolVersionHeader}' is not supported.";
+            return false;
+        }
+
+        errorMessage = null;
+        return true;
+    }
 
     private static bool MatchesApplicationJsonMediaType(MediaTypeHeaderValue acceptHeaderValue)
         => acceptHeaderValue.MatchesMediaType("application/json");

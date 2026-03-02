@@ -1,4 +1,5 @@
-﻿using ModelContextProtocol.Protocol;
+﻿using System.Diagnostics.CodeAnalysis;
+using ModelContextProtocol.Protocol;
 
 namespace ModelContextProtocol.Client;
 
@@ -7,6 +8,14 @@ namespace ModelContextProtocol.Client;
 /// </summary>
 public abstract partial class McpClient : McpSession
 {
+    /// <summary>
+    /// Initializes a new instance of the <see cref="McpClient"/> class.
+    /// </summary>
+    [Experimental(Experimentals.Subclassing_DiagnosticId, UrlFormat = Experimentals.Subclassing_Url)]
+    protected McpClient()
+    {
+    }
+
     /// <summary>
     /// Gets the capabilities supported by the connected server.
     /// </summary>
@@ -35,11 +44,11 @@ public abstract partial class McpClient : McpSession
     /// <remarks>
     /// <para>
     /// This property contains instructions provided by the server during initialization that explain
-    /// how to effectively use its capabilities. These instructions can include details about available
-    /// tools, expected input formats, limitations, or any other helpful information.
+    /// how to effectively use its capabilities. They should focus on guidance that helps a model
+    /// use the server effectively and should avoid duplicating tool, prompt, or resource descriptions.
     /// </para>
     /// <para>
-    /// This can be used by clients to improve an LLM's understanding of available tools, prompts, and resources.
+    /// This can be used by clients to improve an LLM's understanding of how to use the server.
     /// It can be thought of like a "hint" to the model and can be added to a system prompt.
     /// </para>
     /// </remarks>

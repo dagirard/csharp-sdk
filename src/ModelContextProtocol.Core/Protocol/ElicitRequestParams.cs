@@ -99,8 +99,18 @@ public sealed class ElicitRequestParams : RequestParams
     /// When present, indicates that the requestor wants this operation executed as a task.
     /// The receiver must support task augmentation for this specific request type.
     /// </remarks>
+    [Experimental(Experimentals.Tasks_DiagnosticId, UrlFormat = Experimentals.Tasks_Url)]
+    [JsonIgnore]
+    public McpTaskMetadata? Task
+    {
+        get => TaskCore;
+        set => TaskCore = value;
+    }
+
+    // See ExperimentalInternalPropertyTests.cs before modifying this property.
+    [JsonInclude]
     [JsonPropertyName("task")]
-    public McpTaskMetadata? Task { get; set; }
+    internal McpTaskMetadata? TaskCore { get; set; }
 
     /// <summary>Represents a request schema used in a form mode elicitation request.</summary>
     public sealed class RequestSchema
@@ -172,10 +182,12 @@ public sealed class ElicitRequestParams : RequestParams
         public string? Description { get; set; }
 
         /// <summary>
-        /// Provides a <see cref="JsonConverter"/> for <see cref="ResourceContents"/>.
+        /// Provides a <see cref="JsonConverter"/> for <see cref="PrimitiveSchemaDefinition"/>.
         /// </summary>
+        /// <remarks>
         /// Provides a polymorphic converter for the <see cref="PrimitiveSchemaDefinition"/> class that doesn't require
         /// setting <see cref="JsonSerializerOptions.AllowOutOfOrderMetadataProperties"/> explicitly.
+        /// </remarks>
         [EditorBrowsable(EditorBrowsableState.Never)]
         public sealed class Converter : JsonConverter<PrimitiveSchemaDefinition>
         {
